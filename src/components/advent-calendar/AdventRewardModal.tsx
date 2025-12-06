@@ -10,6 +10,7 @@ import type { Reward } from "../../types/advent";
 import { CosmeticPreview } from "./CosmeticPreview";
 import { getOrDownloadAssetModel } from "../../services/assets-service";
 import { LAUNCHER_THEMES } from "../../store/launcher-theme-store";
+import { logInfo, logError } from "../../utils/logging-utils";
 
 interface AdventRewardModalProps {
   isOpen: boolean;
@@ -32,15 +33,21 @@ function RewardDisplay({ reward, shopItemName, shopItemModelUrl }: { reward: Rew
       setIsLoadingModel(true);
       // Use shopItemModelUrl if available, otherwise fallback to hardcoded URL
       const cdnUrl = shopItemModelUrl || "https://cdn.norisk.gg/misc/fivehead.gltf";
+      logInfo(`[AdventRewardModal] Loading asset model from CDN: ${cdnUrl}`);
+      
       getOrDownloadAssetModel(cdnUrl)
         .then((url) => {
+          logInfo(`[AdventRewardModal] Asset model loaded successfully: ${url}`);
           setModelUrl(url);
           setIsLoadingModel(false);
         })
         .catch((error) => {
-          console.error("Failed to load asset model:", error);
+          logError(`[AdventRewardModal] Failed to load asset model from ${cdnUrl}: ${error}`);
           setIsLoadingModel(false);
         });
+    } else {
+      setModelUrl(null);
+      setIsLoadingModel(false);
     }
   }, [reward, shopItemModelUrl]);
 
