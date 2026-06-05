@@ -1,6 +1,7 @@
-use crate::error::CommandError;
+use crate::error::{AppError, CommandError};
 use crate::state::process_state::ProcessMetadata;
 use crate::state::state_manager::State;
+use chrono::{DateTime, Utc};
 use tauri::Manager;
 use uuid::Uuid;
 
@@ -37,22 +38,80 @@ pub async fn stop_process(process_id: Uuid) -> Result<(), CommandError> {
     Ok(())
 }
 
-#[tauri::command]
-pub async fn get_full_log(process_id: Uuid) -> Result<String, CommandError> {
-    let state = State::get().await?;
-    let log_content = state
-        .process_manager
-        .get_full_log_content(process_id)
-        .await?;
-    Ok(log_content)
+#[derive(serde::Serialize)]
+pub struct ProcessLogCursor {
+    pub cursor: u64,
+    pub output: String,
+    pub new_file: bool,
 }
 
 #[tauri::command]
-pub async fn fetch_crash_report(profile_id: Uuid, process_id: Option<Uuid>) -> Result<Option<String>, CommandError> {
+pub async fn get_process_log_cursor(
+    session_id: String,
+    cursor: u64,
+) -> Result<ProcessLogCursor, CommandError> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    if session_id.is_empty()
+        || session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id.contains("..")
+    {
+        return Err(CommandError::from(AppError::Other(format!(
+            "Invalid log session id: {session_id}"
+        ))));
+    }
+
+    let path = crate::utils::log_archive::archive_root()
+        .join(&session_id)
+        .join("nrc-process.log");
+
+    if !path.exists() {
+        return Ok(ProcessLogCursor {
+            cursor: 0,
+            output: String::new(),
+            new_file: false,
+        });
+    }
+
+    let mut file = tokio::fs::File::open(&path).await.map_err(AppError::Io)?;
+    let len = file.metadata().await.map_err(AppError::Io)?.len();
+
+    let mut cursor = cursor;
+    let mut new_file = false;
+    if cursor > len {
+        cursor = 0;
+        new_file = true;
+    }
+
+    file.seek(std::io::SeekFrom::Start(cursor))
+        .await
+        .map_err(AppError::Io)?;
+    let mut buf = Vec::new();
+    let read = file.read_to_end(&mut buf).await.map_err(AppError::Io)?;
+
+    let output =
+        crate::utils::security_utils::mask_sensitive_data(&String::from_utf8_lossy(&buf));
+
+    Ok(ProcessLogCursor {
+        cursor: cursor + read as u64,
+        output,
+        new_file,
+    })
+}
+
+#[tauri::command]
+pub async fn fetch_crash_report(profile_id: Uuid, process_id: Option<Uuid>, process_start_time: Option<String>) -> Result<Option<String>, CommandError> {
     let state = State::get().await?;
+
+    // Parse the ISO 8601 timestamp if provided
+    let parsed_start_time: Option<DateTime<Utc>> = process_start_time
+        .as_ref()
+        .and_then(|ts| ts.parse::<DateTime<Utc>>().ok());
+
     let crash_content = state
         .process_manager
-        .fetch_latest_crash_report(profile_id, process_id)
+        .fetch_latest_crash_report(profile_id, process_id, parsed_start_time)
         .await?;
     Ok(crash_content)
 }
@@ -62,8 +121,9 @@ pub async fn set_discord_state(
     state_type: String,
     profile_name: Option<String>,
 ) -> Result<(), CommandError> {
+    log::info!("[Discord RPC] set_discord_state called: state_type='{}', profile_name={:?}", state_type, profile_name);
     let state = State::get().await?;
-    //TODO
+    state.discord_manager.set_custom_state(state_type).await;
     Ok(())
 }
 
@@ -116,6 +176,7 @@ pub async fn open_minecraft_log_window<R: tauri::Runtime>(
     .inner_size(1200.0, 800.0)
     .decorations(false)
     .center()
+    .visible(false)
     .build()
     .map_err(|e| CommandError::from(crate::error::AppError::Other(e.to_string())))?;
 
@@ -176,6 +237,7 @@ pub async fn open_single_log_window<R: tauri::Runtime>(
     .inner_size(900.0, 600.0)
     .decorations(false)
     .center()
+    .visible(false)
     .build()
     .map_err(|e| CommandError::from(crate::error::AppError::Other(e.to_string())))?;
 

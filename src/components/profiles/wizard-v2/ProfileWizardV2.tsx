@@ -15,19 +15,23 @@ import { ProfileWizardV2Step2 } from "./ProfileWizardV2Step2";
 import { ProfileWizardV2Step3 } from "./ProfileWizardV2Step3";
 import { useProfileStore } from "../../../store/profile-store";
 import type { CreateProfileParams } from "../../../types/profile";
+import type { ChosenIcon } from "../IconPicker";
+import { uploadProfileImages } from "../../../services/profile-service";
 import { toast } from "react-hot-toast";
 import { Tooltip } from "../../ui/Tooltip";
 import type { NoriskModpacksConfig } from "../../../types/noriskPacks";
 import { extractNrcCompatibility, type NrcCompatibilityData } from "../../../utils/nrc-compatibility";
+import { useTranslation } from "react-i18next";
 
 function NrcCompatibleTooltipContent() {
+  const { t } = useTranslation();
   return (
     <div className="space-y-2">
-      <div className="text-sm text-white">This version supports NoRisk Client</div>
+      <div className="text-sm text-white">{t('profiles.wizard.nrcCompatible')}</div>
       <div className="flex items-start gap-2">
         <Icon icon="solar:lightbulb-bold" className="text-yellow-400 text-base flex-shrink-0" />
         <div className="text-gray-300 text-xs italic">
-          NRC features and mods will be available.
+          {t('profiles.wizard.nrcFeaturesAvailable')}
         </div>
       </div>
     </div>
@@ -41,6 +45,7 @@ interface ProfileWizardV2Props {
 }
 
 export function ProfileWizardV2({ onClose, onSave, defaultGroup }: ProfileWizardV2Props) {
+  const { t } = useTranslation();
   const accentColor = useThemeStore((state) => state.accentColor);
   const [currentStep, setCurrentStep] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -82,7 +87,7 @@ export function ProfileWizardV2({ onClose, onSave, defaultGroup }: ProfileWizard
           setSelectedVersion(latestRelease.id);
         }
       } catch (err) {
-        setError("Failed to load Minecraft versions. Please try again.");
+        setError(t('profiles.wizard.loadVersionsError'));
         console.error("Failed to load Minecraft versions:", err);
       } finally {
         clearTimeout(loadingTimeout);
@@ -144,6 +149,7 @@ export function ProfileWizardV2({ onClose, onSave, defaultGroup }: ProfileWizard
     memoryMaxMb: number;
     selectedNoriskPackId: string | null;
     use_shared_minecraft_folder?: boolean;
+    chosenIcon: ChosenIcon;
   }) => {
     const { createProfile } = useProfileStore.getState();
 
@@ -178,15 +184,27 @@ export function ProfileWizardV2({ onClose, onSave, defaultGroup }: ProfileWizard
         await useProfileStore.getState().updateProfile(profileId, updateData);
       }
 
+      // Apply the chosen profile icon (best-effort — a download failure must not abort creation)
+      try {
+        const icon = profileData.chosenIcon;
+        await uploadProfileImages({
+          profileId,
+          imageType: "icon",
+          ...("url" in icon ? { iconUrl: icon.url } : { path: icon.path }),
+        });
+      } catch (iconErr) {
+        console.warn("Failed to apply profile icon:", iconErr);
+      }
+
       const createdProfile = await useProfileStore.getState().getProfile(profileId);
       onSave(createdProfile);
       return createdProfile;
     };
 
     return toast.promise(creationPromise(), {
-      loading: "Creating profile...",
-      success: (createdProfile) => `Profile '${createdProfile.name}' created successfully!`,
-      error: (err) => `Failed to create profile: ${err instanceof Error ? err.message : String(err)}`,
+      loading: t('profiles.wizard.creatingProfile'),
+      success: (createdProfile) => t('profiles.wizard.createSuccess', { name: createdProfile.name }),
+      error: (err) => t('profiles.wizard.createError', { error: err instanceof Error ? err.message : String(err) }),
     });
   };
 
@@ -203,7 +221,7 @@ export function ProfileWizardV2({ onClose, onSave, defaultGroup }: ProfileWizard
       return (
         <div className="flex flex-col items-center justify-center h-64">
           <Icon icon="solar:refresh-bold" className="w-12 h-12 text-white animate-spin mb-4" />
-          <p className="text-xl font-minecraft text-white lowercase">loading versions...</p>
+          <p className="text-xl font-minecraft text-white lowercase">{t('profiles.wizard.loadingVersions')}</p>
         </div>
       );
     }
@@ -219,7 +237,7 @@ export function ProfileWizardV2({ onClose, onSave, defaultGroup }: ProfileWizard
           <SearchWithFilters
             searchValue={searchQuery}
             onSearchChange={setSearchQuery}
-            placeholder="Search versions..."
+            placeholder={t('profiles.wizard.searchVersions')}
             showSort={false}
             showFilter={false}
             className="flex-1"
@@ -227,8 +245,8 @@ export function ProfileWizardV2({ onClose, onSave, defaultGroup }: ProfileWizard
 
           <div className="flex gap-2">
             {[
-              { key: "release", label: "Release", icon: "solar:star-bold" },
-              { key: "snapshot", label: "Snapshot", icon: "solar:test-tube-bold" }
+              { key: "release", label: t('profiles.wizard.release'), icon: "solar:star-bold" },
+              { key: "snapshot", label: t('profiles.wizard.snapshot'), icon: "solar:test-tube-bold" }
             ].map(type => (
               <Button
                 key={type.key}
@@ -288,7 +306,7 @@ export function ProfileWizardV2({ onClose, onSave, defaultGroup }: ProfileWizard
         {filteredVersions.length === 0 && !loading && (
           <div className="col-span-3 text-center py-8">
             <Icon icon="solar:magnifer-bold" className="w-12 h-12 text-white/50 mx-auto mb-2" />
-            <p className="text-lg font-minecraft text-white/70 lowercase">no versions found</p>
+            <p className="text-lg font-minecraft text-white/70 lowercase">{t('profiles.wizard.noVersionsFound')}</p>
           </div>
         )}
       </div>
@@ -306,7 +324,7 @@ export function ProfileWizardV2({ onClose, onSave, defaultGroup }: ProfileWizard
         icon={<Icon icon="solar:arrow-right-bold" className="w-5 h-5" />}
         iconPosition="right"
       >
-        next
+        {t('profiles.wizard.next')}
       </Button>
     </div>
   );
@@ -342,7 +360,7 @@ export function ProfileWizardV2({ onClose, onSave, defaultGroup }: ProfileWizard
   // Default: Show Step 1
   return (
     <Modal
-      title="create profile - select minecraft version"
+      title={t('profiles.wizard.step1Title')}
       onClose={onClose}
       width="lg"
       footer={renderFooter()}

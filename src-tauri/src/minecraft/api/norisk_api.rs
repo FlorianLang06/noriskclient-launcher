@@ -124,6 +124,14 @@ pub struct AdventCalendarDay {
     pub shop_item_model_url: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UniquePlayersResponse {
+    pub count: i64,
+    pub window_hours: i32,
+    pub computed_at_ms: i64,
+}
+
 pub struct NoRiskApi;
 
 impl NoRiskApi {
@@ -556,7 +564,7 @@ impl NoRiskApi {
             "[NoRisk API] Fetching standard version profiles. Experimental: {}",
             is_experimental
         );
-        Self::get_from_norisk_endpoint("launcher/versions", norisk_token, None, is_experimental)
+        Self::get_from_norisk_endpoint("launcher/versions-v3", norisk_token, None, is_experimental)
             .await
     }
 
@@ -742,6 +750,53 @@ impl NoRiskApi {
         response.text().await.map_err(|e| {
             error!("[NoRisk API] Failed to read mobile app token response: {}", e);
             AppError::ParseError(format!("Failed to read NoRisk API mobile app token response: {}", e))
+        })
+    }
+
+    pub async fn get_user_permissions(
+        norisk_token: &str,
+        player_uuid: &str,
+        is_experimental: bool,
+    ) -> Result<Vec<String>> {
+        let base_url = Self::get_api_base(is_experimental);
+        let endpoint = "core/permissions";
+        let url = format!("{}/{}", base_url, endpoint);
+
+        debug!("[NoRisk API] Requesting user permissions for {}", player_uuid);
+        debug!("[NoRisk API] Full URL: {}", url);
+
+        let response = HTTP_CLIENT
+            .get(url)
+            .header("Authorization", format!("Bearer {}", norisk_token))
+            .query(&[("uuid", player_uuid)])
+            .send()
+            .await
+            .map_err(|e| {
+                error!("[NoRisk API] Permissions request failed: {}", e);
+                AppError::RequestError(format!("Failed to get permissions from NoRisk API: {}", e))
+            })?;
+
+        let status = response.status();
+        debug!("[NoRisk API] Permissions response status: {}", status);
+
+        if !status.is_success() {
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error body".to_string());
+            error!(
+                "[NoRisk API] Permissions error response: Status {}, Body: {}",
+                status, error_body
+            );
+            return Err(AppError::RequestError(format!(
+                "NoRisk API returned error status for permissions: {}, Body: {}",
+                status, error_body
+            )));
+        }
+
+        response.json::<Vec<String>>().await.map_err(|e| {
+            error!("[NoRisk API] Failed to parse permissions response: {}", e);
+            AppError::ParseError(format!("Failed to parse NoRisk API permissions response: {}", e))
         })
     }
 
@@ -1118,6 +1173,59 @@ impl NoRiskApi {
             return Err(AppError::RequestError(format!("Status: {}", response.status())));
         }
         Ok(())
+    }
+
+    /// Confirm an auth bridge session for website authentication.
+    /// POST /auth/bridge/confirm?sessionId=xxx
+    pub async fn confirm_auth_bridge(
+        norisk_token: &str,
+        session_id: &str,
+        is_experimental: bool,
+    ) -> Result<()> {
+        let base_url = Self::get_api_base(is_experimental);
+        let url = format!("{}/launcher/auth/bridge/confirm", base_url);
+
+        debug!("[NoRisk API] Confirming auth bridge session: {}", session_id);
+
+        let response = HTTP_CLIENT
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", norisk_token))
+            .query(&[("sessionId", session_id)])
+            .send()
+            .await
+            .map_err(|e| AppError::RequestError(format!("Auth bridge request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(AppError::RequestError(format!(
+                "Auth bridge failed: {} - {}",
+                status, body
+            )));
+        }
+
+        info!("[NoRisk API] Auth bridge confirmation successful");
+        Ok(())
+    }
+
+    /// Fetches the unique players (last 24h) stat from the NoRisk API.
+    /// Public stats endpoint — no authentication required. Backend caches the
+    /// underlying Mongo count for 30 minutes.
+    pub async fn get_unique_players_24h(is_experimental: bool) -> Result<UniquePlayersResponse> {
+        let base_url = Self::get_api_base(is_experimental);
+        let url = format!("{}/core/stats/uniquePlayers24h", base_url);
+
+        debug!("[NoRisk API] GET {}", url);
+
+        let response = HTTP_CLIENT.get(&url).send().await.map_err(|e| {
+            error!("[NoRisk API] uniquePlayers24h request failed: {}", e);
+            AppError::RequestError(format!("Failed to GET {}: {}", url, e))
+        })?;
+
+        crate::utils::api_utils::parse_response_with_logging(response, "UniquePlayers24h").await
     }
 }
 

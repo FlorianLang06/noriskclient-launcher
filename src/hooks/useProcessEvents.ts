@@ -1,9 +1,9 @@
 import { useEffect, useRef } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useProcessStore, ProcessMetrics } from "../store/useProcessStore";
+import i18n from '../i18n/i18n';
 import { EventType, ProcessMetricsPayload, MinecraftProcessExitedPayload } from "../types/events";
 import { ProcessState } from "../types/processState";
-import { useLogThrottle } from "./useLogThrottle";
 
 // Launch status events that should be logged
 const LAUNCH_STATUS_EVENTS = new Set([
@@ -50,8 +50,6 @@ export function useProcessEvents(options: {
 
   const {
     fetchProcesses,
-    addLogEntry,
-    addLogEntriesBatch,
     updateMetrics,
     markProcessStopped,
     addLauncherLog,
@@ -61,12 +59,7 @@ export function useProcessEvents(options: {
     stoppedProcesses,
   } = useProcessStore();
 
-  // Use throttled log entry to prevent UI lag during heavy log output
-  const { throttledAddLog } = useLogThrottle(addLogEntry, addLogEntriesBatch);
-
   const stateEventListenerRef = useRef<UnlistenFn | null>(null);
-  // Track which profiles have received their first MC log (to clear launcher logs)
-  const firstMcLogReceived = useRef<Set<string>>(new Set());
   // Track which profiles have started a new launch (to clear old MC logs)
   const launchStartedForProfile = useRef<Set<string>>(new Set());
 
@@ -87,25 +80,6 @@ export function useProcessEvents(options: {
             if (!isSubscribed) return;
 
             const payload = event.payload;
-
-            // Handle minecraft output (logs)
-            if (payload.event_type === EventType.MinecraftOutput && payload.target_id) {
-              // Check filter
-              if (processFilter && !processFilter.includes(payload.target_id)) {
-                return;
-              }
-
-              // Clear launcher logs on first MC log for this profile
-              const currentProcesses = useProcessStore.getState().processes;
-              const process = currentProcesses.find(p => p.id === payload.target_id);
-              if (process && !firstMcLogReceived.current.has(process.profile_id)) {
-                firstMcLogReceived.current.add(process.profile_id);
-                clearLauncherLogs(process.profile_id);
-              }
-
-              // Use throttled version to prevent UI lag during heavy log output
-              throttledAddLog(payload.target_id, payload.message);
-            }
 
             // Handle process state updates
             if (payload.event_type === EventType.MinecraftProcessExited && payload.target_id) {
@@ -135,17 +109,24 @@ export function useProcessEvents(options: {
 
             // Handle launch successful
             if (payload.event_type === EventType.LaunchSuccessful && payload.target_id) {
-              addLauncherLog(payload.target_id, "✓ Minecraft started successfully!");
+              addLauncherLog(payload.target_id, i18n.t('launch.minecraft_started'));
               // Reset tracking for this profile
-              firstMcLogReceived.current.delete(payload.target_id);
               launchStartedForProfile.current.delete(payload.target_id);
-              // Refetch processes to get the new running process
-              fetchProcesses();
+              // Refetch processes to get the new running process, then auto-switch to it
+              const profileId = payload.target_id;
+              fetchProcesses().then(() => {
+                const newProcess = useProcessStore.getState().processes.find(
+                  p => p.profile_id === profileId
+                );
+                if (newProcess) {
+                  useProcessStore.getState().selectProcess(newProcess.id);
+                }
+              });
             }
 
             // Handle error events
             if (payload.event_type === EventType.Error && payload.target_id) {
-              addLauncherLog(payload.target_id, `✗ Error: ${payload.message || "Unknown error"}`);
+              addLauncherLog(payload.target_id, i18n.t('launch.error', { error: payload.message || i18n.t('common.unknown_error') }));
               // Reset launch tracking on error
               launchStartedForProfile.current.delete(payload.target_id);
             }
@@ -210,7 +191,7 @@ export function useProcessEvents(options: {
 
       console.log("[useProcessEvents] Cleaned up event listeners");
     };
-  }, [autoFetch, processFilter, fetchProcesses, throttledAddLog, updateMetrics, markProcessStopped, addLauncherLog, clearLauncherLogs, clearLogs]);
+  }, [autoFetch, processFilter, fetchProcesses, updateMetrics, markProcessStopped, addLauncherLog, clearLauncherLogs, clearLogs]);
 
   // Return store state and actions for convenience
   return useProcessStore();

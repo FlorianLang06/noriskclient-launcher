@@ -361,6 +361,51 @@ impl MinecraftLauncher {
         // Add profile name for ingame display
         if let Some(p) = &profile {
             command.arg(format!("-Dnorisk.profile.name={}", p.name));
+            if let Some(pack_id) = p.selected_norisk_pack_id.as_ref() {
+                command.arg(format!("-Dnorisk.pack={}", pack_id));
+            }
+        }
+
+        // Pass meta dir to game client for shared Discord state file
+        command.arg(format!("-Dnorisk.meta.dir={}", crate::config::LAUNCHER_DIRECTORY.meta_dir().display()));
+
+        // Hand off asset management to the in-game client only for packs whose
+        // client owns asset management (see `client_managed_assets`). Every
+        // other pack runs the legacy launcher-side asset pipeline — passing the
+        // props there would double-write the cache alongside it.
+        let effective_pack = match &profile {
+            Some(p) => p.effective_norisk_pack_id().await,
+            None => None,
+        };
+        if effective_pack
+            .as_deref()
+            .map(crate::minecraft::downloads::client_managed_assets)
+            .unwrap_or(false)
+        {
+            let pack_id = effective_pack.as_deref().unwrap();
+
+            // Layout matches norisk_assets_download.rs
+            // (`<meta>/assets/noriskclient/<bucket>/objects/...`) so any blob
+            // we've already downloaded is reusable as-is.
+            let assets_root = crate::config::LAUNCHER_DIRECTORY
+                .meta_dir()
+                .join("assets")
+                .join("noriskclient");
+            command.arg(format!("-Dnrc.assets.dir={}", assets_root.display()));
+
+            // Bucket list comes from the resolved pack's `assets` field
+            // (norisk_modpacks.json). Order is base→priority — client overlays
+            // the last entry on top, falling back per-asset.
+            let packs_config = state.norisk_pack_manager.get_config().await;
+            match packs_config.get_resolved_pack_definition(pack_id) {
+                Ok(pack_def) if !pack_def.assets.is_empty() => {
+                    command.arg(format!("-Dnrc.assets.bucket={}", pack_def.assets.join(",")));
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("[launcher] Resolving pack '{}' for nrc.assets.bucket failed: {}", pack_id, e),
+            }
+        } else {
+            info!("[launcher] pack not client-managed — running legacy asset pipeline, omitting -Dnrc.assets.* JVM args");
         }
 
         if let Some(creds) = &self.credentials {
@@ -403,23 +448,28 @@ impl MinecraftLauncher {
             info!("[NoRisk Launcher] No credentials available, skipping NoRisk parameters");
         }
 
-        // Add Fabric specific mods folder argument if loader is Fabric
-        // Note: When using -Dfabric.addMods (prototype), this is still harmless and allows user mods in mods/.
+        // Add per-loader mods-folder JVM argument so the loader picks up jars from the
+        // launcher-managed per-version directory (analogous to fabric.modsFolder, mirrored
+        // for Forge/NeoForge via nrc-forgeloader's -Dnrc.modsFolder).
+        // Note: complementary to addMods=@<meta>, both sources are merged by the loader.
         if let Some(p_ref) = &profile {
-            if p_ref.loader == crate::state::profile_state::ModLoader::Fabric {
+            let prop: Option<&str> = match p_ref.loader {
+                crate::state::profile_state::ModLoader::Fabric => Some("fabric.modsFolder"),
+                crate::state::profile_state::ModLoader::Forge
+                | crate::state::profile_state::ModLoader::NeoForge => Some("nrc.modsFolder"),
+                _ => None,
+            };
+            if let Some(prop) = prop {
                 match state.profile_manager.get_profile_mods_path(p_ref) {
                     Ok(mods_path) => {
                         let mods_path_str = mods_path.to_string_lossy().replace("\\", "/");
-                        let fabric_mods_arg = format!("-Dfabric.modsFolder={}", mods_path_str);
-                        info!(
-                            "Adding Fabric mods folder JVM argument: {}",
-                            fabric_mods_arg
-                        );
-                        command.arg(fabric_mods_arg);
+                        let mods_arg = format!("-D{}={}", prop, mods_path_str);
+                        info!("Adding mods folder JVM argument: {}", mods_arg);
+                        command.arg(mods_arg);
                     }
                     Err(e) => {
                         warn!(
-                            "Could not get Fabric mods path for profile '{}' (ID: {}): {}. Fabric mods folder argument will not be set.",
+                            "Could not get mods path for profile '{}' (ID: {}): {}. Mods folder argument will not be set.",
                             p_ref.name, p_ref.id, e
                         );
                     }
@@ -517,6 +567,10 @@ impl MinecraftLauncher {
         };
 
         // Extract optional profile information for process metadata
+        let effective_pack = match &profile {
+            Some(p) => p.effective_norisk_pack_id().await,
+            None => None,
+        };
         let (profile_loader, profile_loader_version, profile_norisk_pack, profile_name, profile_image_url) =
             match profile {
                 Some(p) => {
@@ -529,7 +583,7 @@ impl MinecraftLauncher {
                     (
                         Some(p.loader.as_str().to_string()),
                         p.loader_version,
-                        p.selected_norisk_pack_id,
+                        effective_pack,
                         Some(p.name),
                         image_url,
                     )
@@ -540,6 +594,16 @@ impl MinecraftLauncher {
         // Get post-exit hook from config at launch time (not at exit time)
         let launcher_config = state.config_manager.get_config().await;
         let post_exit_hook = launcher_config.hooks.post_exit.clone();
+
+        // Clear latest.log before launch to avoid mixing logs from previous sessions
+        let latest_log = self.game_directory.join("logs").join("latest.log");
+        if latest_log.exists() {
+            if let Err(e) = std::fs::remove_file(&latest_log) {
+                log::warn!("Failed to clear latest.log before launch: {}", e);
+            } else {
+                log::info!("Cleared previous latest.log before launch");
+            }
+        }
 
         // Start the process using ProcessManager with additional metadata
         process_manager

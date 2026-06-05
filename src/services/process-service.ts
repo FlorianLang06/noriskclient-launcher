@@ -2,9 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 // Import the actual type with corrected path
 import type { ProcessMetadata, CrashlogDto } from "../types/processState";
 import { getLauncherConfig } from "./launcher-config-service";
-import flagsmith from "flagsmith";
+import { hasPermission } from "./permission-service";
+import { PERMISSION } from "../constants/permissions";
 import { toast } from "react-hot-toast";
 import { logInfo, logWarn } from "../utils/logging-utils";
+import i18n from '../i18n/i18n';
 
 export async function isMinecraftRunning(profileId: string): Promise<boolean> {
   try {
@@ -30,21 +32,21 @@ export async function launch(
   migrationInfo?: any,
   skipLastPlayedUpdate?: boolean
 ): Promise<void> {
-  // Guard: If experimental mode is enabled in settings, require feature flag to be enabled
+  // Guard: If experimental mode is enabled in settings, require backend permission
   try {
     const config = await getLauncherConfig();
     if (config?.is_experimental) {
       logInfo("[ProcessService] Experimental mode is enabled in settings");
-      const isAllowed = flagsmith.hasFeature("show_experimental_mode", { fallback: false });
-      logInfo(`[ProcessService] Feature flag check result: ${isAllowed}`);
+      const isAllowed = await hasPermission(PERMISSION.EXPERIMENTAL_MODE);
+      logInfo(`[ProcessService] Permission check result: ${isAllowed}`);
       if (!isAllowed) {
-        toast.error("Please disable experimental mode in Settings.");
+        toast.error(i18n.t('settings.disable_experimental'));
         return; // Block launch
       }
     }
   } catch (e) {
     logWarn(
-      `[ProcessService] Failed to check experimental mode flag: ${e instanceof Error ? e.message : String(e)}`,
+      `[ProcessService] Failed to check experimental permission: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 
@@ -105,33 +107,41 @@ export async function openLogWindow(processId: string): Promise<void> {
   }
 }
 
-/**
- * Fetches the full log content for a specific process ID (Uuid).
- */
-export async function getLogContentForProcess(processId: string): Promise<string> {
-  console.debug(`[ProcessService] Fetching full log for process ID: ${processId}`);
+export async function getProcess(processId: string): Promise<ProcessMetadata | null> {
   try {
-    const logContent = await invoke<string>("get_full_log", { processId });
-    return logContent || ""; // Return empty string if null/undefined
+    return await invoke<ProcessMetadata | null>("get_process", { processId });
   } catch (error) {
-    console.error(`[ProcessService] Failed to get full log for process ID ${processId}:`, error);
-    // Return an empty string or re-throw based on how errors should be handled downstream
-    return ""; 
-    // throw error; 
+    console.error(`[ProcessService] Failed to get process ${processId}:`, error);
+    return null;
   }
+}
+
+export interface ProcessLogCursor {
+  cursor: number;
+  output: string;
+  new_file: boolean;
+}
+
+export async function getProcessLogCursor(
+  sessionId: string,
+  cursor: number,
+): Promise<ProcessLogCursor> {
+  return invoke<ProcessLogCursor>("get_process_log_cursor", { sessionId, cursor });
 }
 
 /**
  * Manually fetches the latest crash report for a specific profile and process.
  * @param profileId - The profile UUID (to locate crash-reports folder)
  * @param processId - The process UUID (for event emission, optional)
+ * @param processStartTime - The process start time as ISO 8601 string (optional, filters out older crash reports)
  */
-export async function fetchCrashReport(profileId: string, processId?: string): Promise<string | null> {
-  console.debug(`[ProcessService] Fetching crash report for profile ${profileId}, process ${processId || 'none'}`);
+export async function fetchCrashReport(profileId: string, processId?: string, processStartTime?: string): Promise<string | null> {
+  console.debug(`[ProcessService] Fetching crash report for profile ${profileId}, process ${processId || 'none'}, startTime ${processStartTime || 'none'}`);
   try {
-    const crashContent = await invoke<string | null>("fetch_crash_report", { 
-      profileId, 
-      processId: processId || null 
+    const crashContent = await invoke<string | null>("fetch_crash_report", {
+      profileId,
+      processId: processId || null,
+      processStartTime: processStartTime || null
     });
     return crashContent || null;
   } catch (error) {
